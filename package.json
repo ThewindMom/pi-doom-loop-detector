@@ -1,0 +1,45 @@
+{
+  "name": "pi-doom-loop-detector",
+  "version": "0.1.0",
+  "description": "Detects doom loops in LLM outputs and enables recovery injection",
+  "main": "./index.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thewind/pi-doom-loop-detector.git"
+  },
+  "author": "The Wind <thewind@example.com>",
+  "license": "MIT",
+  "keywords": [
+    "pi",
+    "pi-extension",
+    "doom-loop",
+    "llm",
+    "recovery",
+    "ai-agent",
+    "loop-detection"
+  ],
+  "homepage": "https://github.com/thewind/pi-doom-loop-detector#readme",
+  "bugs": {
+    "url": "https://github.com/thewind/pi-doom-loop-detector/issues"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.51.0",
+    "@mariozechner/pi-agent-core": ">=0.51.0"
+  },
+  "peerDependenciesMeta": {
+    "@mariozechner/pi-coding-agent": {
+      "optional": true
+    },
+    "@mariozechner/pi-agent-core": {
+      "optional": true
+    }
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

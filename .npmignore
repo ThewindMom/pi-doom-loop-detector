@@ -1,0 +1,7 @@
+# Test files
+test.ts
+test-recovery.ts
+
+# Development files
+*.test.ts
+*.spec.ts
