@@ -54,7 +54,7 @@ export default function (pi: ExtensionAPI) {
 
       // S02: Inject recovery prompt to break the loop
       pi.sendUserMessage(
-        `I notice you have been repeating "${result.phrase}" multiple times. Please take a different approach and continue productively.`,
+        `I notice you have been repeating "${result.phrase}" multiple times. Please think from first principles, take a different approach and continue from there.`,
         { deliverAs: "followUp" }
       );
     }
