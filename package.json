@@ -5,9 +5,9 @@
   "main": "./index.ts",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thewind/pi-doom-loop-detector.git"
+    "url": "git+https://github.com/ThewindMom/pi-doom-loop-detector.git"
   },
-  "author": "The Wind <thewind@example.com>",
+  "author": "The Wind",
   "license": "MIT",
   "keywords": [
     "pi",
@@ -18,9 +18,9 @@
     "ai-agent",
     "loop-detection"
   ],
-  "homepage": "https://github.com/thewind/pi-doom-loop-detector#readme",
+  "homepage": "https://github.com/ThewindMom/pi-doom-loop-detector#readme",
   "bugs": {
-    "url": "https://github.com/thewind/pi-doom-loop-detector/issues"
+    "url": "https://github.com/ThewindMom/pi-doom-loop-detector/issues"
   },
   "pi": {
     "extensions": [
