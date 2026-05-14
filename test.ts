@@ -3,7 +3,14 @@
  * Run with: npx tsx test.ts
  */
 
-import { findRepeatedPhrase, extractText, detectDoomLoop, DEFAULT_CONFIG } from "./detect-loop.ts";
+import {
+  findRepeatedPhrase,
+  findRepeatedIntent,
+  findIntentCycle,
+  extractText,
+  detectDoomLoop,
+  DEFAULT_CONFIG,
+} from "./detect-loop.ts";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 
 function test(name: string, fn: () => void) {
@@ -136,6 +143,114 @@ test("detects roadmap demo phrase 'test phrase test phrase test phrase'", () => 
   assert(result !== null, "Should detect the roadmap demo phrase");
   assert(result!.phrase === "test phrase", `Expected "test phrase", got "${result!.phrase}"`);
   assert(result!.count === 3, `Expected count 3, got ${result!.count}`);
+});
+
+// Test 10: Real-world loop with wording variation
+test("detects repeated action intent with wording variation", () => {
+  const text = [
+    "Let me check .dockerignore and verify source files.",
+    "I should check .dockerignore and verify source files.",
+    "Let me do that.",
+    "Let me check .dockerignore and verify source files.",
+    "I should check .dockerignore and verify source files.",
+    "Let me do that.",
+    "Let me check .dockerignore and verify source files.",
+  ].join(" ");
+
+  const result = findRepeatedIntent(text, { ...DEFAULT_CONFIG, minWords: 2 });
+  assert(result !== null, "Should detect repeated action intent");
+  assert(result!.phrase.includes("check dockerignore verify source files"), `Unexpected phrase: ${result!.phrase}`);
+  assert(result!.count >= 3, `Expected count >= 3, got ${result!.count}`);
+});
+
+// Test 11: Docker compose read loop from real failure mode
+test("detects repeated docker compose read intent only through explicit intent helper", () => {
+  const text = [
+    "I'll read docker-compose.yml.",
+    "I'll read the docker compose file.",
+    "I'll read docker compose config.",
+    "OK I'll read it now.",
+    "I'll read docker-compose.yml.",
+    "Let me read the docker compose file now.",
+    "I'll read docker compose config.",
+  ].join(" ");
+
+  const result = findRepeatedIntent(text, { ...DEFAULT_CONFIG, minWords: 2 });
+
+  assert(result !== null, "Should detect repeated read intent");
+  assert(result!.phrase.includes("read docker compose"), `Unexpected phrase: ${result!.phrase}`);
+});
+
+// Test 12: detectDoomLoop ignores fuzzy intent repetition to avoid false auto-aborts
+test("detectDoomLoop does not flag repeated file-name intent summaries", () => {
+  const text = [
+    "Fix made in index.ts and test-recovery.ts.",
+    "Validation ran test.ts and test-recovery.ts.",
+    "Note: test-recovery.ts now covers ctx.abort.",
+  ].join(" ");
+
+  const result = detectDoomLoop([
+    {
+      role: "assistant",
+      content: [{ type: "text", text }],
+      api: "anthropic-messages",
+      provider: "anthropic",
+      model: "claude-3",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+  ] as AgentMessage[], { ...DEFAULT_CONFIG, minWords: 2 });
+
+  assert(result === null, `Should not detect fuzzy file-name repetition, got ${result?.phrase}`);
+});
+
+// Test 13: Intent cycles across fragments
+test("detects cyclic intent pattern", () => {
+  const text = [
+    "I'll read docker-compose.yml.",
+    "I'll check the logs.",
+    "I'll read docker-compose.yml.",
+    "I'll check the logs.",
+    "I'll read docker-compose.yml.",
+    "I'll check the logs.",
+  ].join(" ");
+
+  const result = findIntentCycle(text, DEFAULT_CONFIG);
+  assert(result !== null, "Should detect A-B-A-B cycle");
+  assert(result!.kind === "cycle", `Expected cycle kind, got ${result!.kind}`);
+});
+
+// Test 13: Normal varied tool-using response should not trigger
+test("does not flag normal varied assistant progress", () => {
+  const messages: AgentMessage[] = [
+    {
+      role: "assistant",
+      content: [
+        { type: "text", text: "I'll inspect the project structure first." },
+        { type: "toolCall", id: "1", name: "bash", arguments: { command: "ls" } },
+      ],
+      api: "anthropic-messages",
+      provider: "anthropic",
+      model: "claude-3",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "toolUse",
+      timestamp: Date.now(),
+    },
+    {
+      role: "assistant",
+      content: [{ type: "text", text: "Package metadata shows a small TypeScript extension. Next I will review the tests." }],
+      api: "anthropic-messages",
+      provider: "anthropic",
+      model: "claude-3",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop",
+      timestamp: Date.now(),
+    },
+  ] as AgentMessage[];
+
+  const result = detectDoomLoop(messages, DEFAULT_CONFIG);
+  assert(result === null, `Should not detect normal progress, got ${result?.phrase}`);
 });
 
 console.log("\n✅ All tests passed!");

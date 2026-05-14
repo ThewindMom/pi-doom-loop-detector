@@ -1,8 +1,12 @@
 /**
  * Doom Loop Detection Algorithm
  * 
- * Detects repetitive phrase patterns within message content using
- * consecutive n-gram repetition detection.
+ * Detects repetitive phrase patterns within message content.
+ *
+ * First principles:
+ * - A useful detector should catch loops before the full agent run ends.
+ * - Exact text repetition is the only automatic abort trigger.
+ * - Intent similarity is useful for diagnostics, but too fuzzy for interrupting agents.
  */
 
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
@@ -15,6 +19,8 @@ export interface DetectionResult {
   count: number;
   /** Word count of the repeated phrase */
   wordCount: number;
+  /** Detection strategy that triggered */
+  kind?: "exact" | "intent" | "cycle";
 }
 
 /** Configuration for detection */
@@ -25,12 +31,18 @@ export interface DetectionConfig {
   maxWords?: number;
   /** Repetition threshold to trigger detection (default: 3) */
   threshold?: number;
+  /** Maximum recent text window to inspect (default: 4000 chars) */
+  windowChars?: number;
+  /** Maximum sentence-cycle length to inspect (default: 4) */
+  maxCycleLength?: number;
 }
 
 const DEFAULT_CONFIG: Required<DetectionConfig> = {
   minWords: 3,
   maxWords: 10,
   threshold: 3,
+  windowChars: 4000,
+  maxCycleLength: 4,
 };
 
 /**
@@ -59,6 +71,8 @@ export function extractText(messages: AgentMessage[]): string {
  */
 function tokenize(text: string): string[] {
   return text
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201c\u201d]/g, '"')
     .trim()
     .split(/\s+/)
     .filter(word => word.length > 0);
@@ -130,6 +144,7 @@ export function findRepeatedPhrase(
             phrase,
             count,
             wordCount: phraseLength,
+            kind: "exact",
           };
         }
       }
@@ -140,17 +155,180 @@ export function findRepeatedPhrase(
 }
 
 /**
+ * Split free-form assistant output into sentences/fragments.
+ * Streaming text often has line breaks instead of clean punctuation.
+ */
+function splitSentences(text: string): string[] {
+  return text
+    // Do not split on punctuation inside paths like `.dockerignore` or `docker-compose.yml`.
+    .split(/(?<=[!?])\s+|(?<=[a-z0-9])\.(?=\s|$)|\n+/i)
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+}
+
+/**
+ * Normalize one sentence into an action intent.
+ *
+ * Examples:
+ * - "Let me check .dockerignore and verify source files"
+ *   -> "check dockerignore verify source files"
+ * - "I should check .dockerignore and verify source files"
+ *   -> "check dockerignore verify source files"
+ * - "OK I'll read docker-compose.yml"
+ *   -> "read docker compose yml"
+ */
+function canonicalIntent(sentence: string): string | null {
+  let normalized = sentence
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/\bi['’]?ll\b/g, "i will")
+    .replace(/\bi['’]?m\b/g, "i am")
+    .replace(/\b(?:ok|okay|alright|now|next|so)\b/g, " ")
+    .replace(/\b(?:let me|i should|i need to|i will|i am going to|i can|i'll)\b/g, " ")
+    .replace(/\b(?:just|actually|really|now|then|first|also)\b/g, " ")
+    .replace(/[-_/\\.]+/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // Keep only action-like fragments. This avoids flagging repeated nouns or prose.
+  const action = normalized.match(
+    /\b(read|check|verify|inspect|open|look|review|examine|find|search|run|test|fix|update|edit|write|create|build|install|restart|reload)\b/
+  );
+  if (!action) return null;
+
+  normalized = normalized.slice(action.index).trim();
+
+  // Drop low-value trailing filler after preserving action/object.
+  normalized = normalized
+    .replace(/\b(?:do that|do it|do this|right away|from there)\b/g, " ")
+    .replace(/\b(?:and|the|a|an)\b/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const words = normalized.split(/\s+/).filter(Boolean);
+  if (words.length < 2) return null;
+
+  return words.slice(0, 8).join(" ");
+}
+
+function similarIntent(a: string, b: string): boolean {
+  if (a === b) return true;
+
+  const aWords = new Set(a.split(" "));
+  const bWords = new Set(b.split(" "));
+  const shared = [...aWords].filter((word) => bWords.has(word)).length;
+  const smaller = Math.min(aWords.size, bWords.size);
+
+  return smaller >= 3 && shared / smaller >= 0.75;
+}
+
+/**
+ * Detect repeated action intent with wording variation.
+ * Conservative: only action-intent fragments are considered.
+ */
+export function findRepeatedIntent(
+  text: string,
+  config: DetectionConfig = {}
+): DetectionResult | null {
+  const { threshold } = { ...DEFAULT_CONFIG, ...config };
+  const intents = splitSentences(text)
+    .map(canonicalIntent)
+    .filter((intent): intent is string => intent !== null);
+
+  if (intents.length < threshold) return null;
+
+  const clusters: { intent: string; count: number }[] = [];
+  for (const intent of intents) {
+    const existing = clusters.find((cluster) => similarIntent(cluster.intent, intent));
+    if (existing) {
+      existing.count++;
+    } else {
+      clusters.push({ intent, count: 1 });
+    }
+  }
+
+  const best = clusters.sort((a, b) => b.count - a.count)[0];
+  if (!best || best.count < threshold) return null;
+
+  return {
+    phrase: best.intent,
+    count: best.count,
+    wordCount: best.intent.split(" ").length,
+    kind: "intent",
+  };
+}
+
+/**
+ * Detect repeated cycles of action intents: A-B-C-A-B-C.
+ */
+export function findIntentCycle(
+  text: string,
+  config: DetectionConfig = {}
+): DetectionResult | null {
+  const { threshold, maxCycleLength } = { ...DEFAULT_CONFIG, ...config };
+  const minCycles = Math.max(2, Math.min(threshold, 3));
+  const intents = splitSentences(text)
+    .map(canonicalIntent)
+    .filter((intent): intent is string => intent !== null);
+
+  if (intents.length < minCycles * 2) return null;
+
+  for (let cycleLength = 2; cycleLength <= maxCycleLength; cycleLength++) {
+    if (intents.length < cycleLength * minCycles) continue;
+
+    for (let start = 0; start <= intents.length - cycleLength * minCycles; start++) {
+      const cycle = intents.slice(start, start + cycleLength);
+      let cycles = 1;
+
+      for (
+        let pos = start + cycleLength;
+        pos + cycleLength <= intents.length;
+        pos += cycleLength
+      ) {
+        const next = intents.slice(pos, pos + cycleLength);
+        const matches = cycle.filter((intent, index) => similarIntent(intent, next[index])).length;
+        if (matches >= cycleLength - 1) {
+          cycles++;
+        } else {
+          break;
+        }
+      }
+
+      if (cycles >= minCycles) {
+        const phrase = cycle.join(" → ");
+        return {
+          phrase: phrase.length > 120 ? `${phrase.slice(0, 117)}...` : phrase,
+          count: cycles,
+          wordCount: cycleLength,
+          kind: "cycle",
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Detect doom loops in agent messages.
- * Convenience wrapper combining extractText and findRepeatedPhrase.
+ * Convenience wrapper combining extractText and exact repeated phrase detection.
+ *
+ * Important: this deliberately does not use intent/cycle detection. Those fuzzy
+ * detectors can flag normal status summaries that repeat file names or task
+ * labels (for example, `test-recovery.ts`) and are too harsh for auto-abort.
  */
 export function detectDoomLoop(
   messages: AgentMessage[],
   config: DetectionConfig = {}
 ): DetectionResult | null {
-  const text = extractText(messages);
+  const { windowChars } = { ...DEFAULT_CONFIG, ...config };
+  const fullText = extractText(messages);
+  const text = fullText.length > windowChars ? fullText.slice(-windowChars) : fullText;
   if (!text.trim()) {
     return null;
   }
+
   return findRepeatedPhrase(text, config);
 }
 

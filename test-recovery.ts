@@ -76,11 +76,19 @@ function createMockPi(): {
 function createMockCtx(hasUI: boolean): {
   ctx: any;
   notifyCalls: MockNotifyCall[];
+  abortCalls: { count: number };
 } {
   const notifyCalls: MockNotifyCall[] = [];
+  const abortCalls = { count: 0 };
 
   const ctx = {
     hasUI,
+    isIdle() {
+      return false;
+    },
+    abort() {
+      abortCalls.count += 1;
+    },
     ui: {
       notify(message: string, type: string) {
         notifyCalls.push({ message, type });
@@ -88,7 +96,7 @@ function createMockCtx(hasUI: boolean): {
     },
   };
 
-  return { ctx, notifyCalls };
+  return { ctx, notifyCalls, abortCalls };
 }
 
 // Import the extension
@@ -129,8 +137,8 @@ test("recovery flow: calls notify and sendUserMessage when doom loop detected", 
   // Verify notify was called
   assert(notifyCalls.length === 1, `Expected 1 notify call, got ${notifyCalls.length}`);
   assert(
-    notifyCalls[0].message.includes("Doom loop detected"),
-    `Expected notify message to contain "Doom loop detected", got "${notifyCalls[0].message}"`
+    notifyCalls[0].message.includes("Repetition detected"),
+    `Expected notify message to contain "Repetition detected", got "${notifyCalls[0].message}"`
   );
   assert(
     notifyCalls[0].message.includes("test phrase"),
@@ -190,8 +198,8 @@ test("recovery flow: does nothing when no doom loop detected", async () => {
   assert(sendUserMessageCalls.length === 0, `Expected 0 sendUserMessage calls when no loop detected, got ${sendUserMessageCalls.length}`);
 });
 
-// Test 3: No recovery flow when ctx.hasUI is false
-test("recovery flow: does nothing when ctx.hasUI is false", async () => {
+// Test 3: Recovery still works without UI, but skips toast notification
+test("recovery flow: sends recovery when ctx.hasUI is false", async () => {
   // Setup mocks with hasUI = false
   const { pi, handlers, sendUserMessageCalls } = createMockPi();
   const { ctx, notifyCalls } = createMockCtx(false);
@@ -225,8 +233,8 @@ test("recovery flow: does nothing when ctx.hasUI is false", async () => {
   // Verify notify was NOT called (because hasUI is false)
   assert(notifyCalls.length === 0, `Expected 0 notify calls when hasUI is false, got ${notifyCalls.length}`);
 
-  // Verify sendUserMessage was NOT called (because hasUI is false)
-  assert(sendUserMessageCalls.length === 0, `Expected 0 sendUserMessage calls when hasUI is false, got ${sendUserMessageCalls.length}`);
+  // Verify sendUserMessage was still called (headless/RPC modes still need recovery)
+  assert(sendUserMessageCalls.length === 1, `Expected 1 sendUserMessage call when hasUI is false, got ${sendUserMessageCalls.length}`);
 });
 
 // Test 4: Detects doom loop with longer repeated phrase
@@ -268,8 +276,8 @@ test("recovery flow: detects and recovers from longer repeated phrases", async (
     `Expected notify message to contain "I will help you", got "${notifyCalls[0].message}"`
   );
   assert(
-    notifyCalls[0].message.includes("repeated 3 times"),
-    `Expected notify message to contain "repeated 3 times", got "${notifyCalls[0].message}"`
+    notifyCalls[0].message.includes("x3"),
+    `Expected notify message to contain "x3", got "${notifyCalls[0].message}"`
   );
 
   // Verify sendUserMessage was called with the correct phrase
@@ -278,6 +286,34 @@ test("recovery flow: detects and recovers from longer repeated phrases", async (
     sendUserMessageCalls[0].message.includes("I will help you"),
     `Expected sendUserMessage to mention the repeated phrase, got "${sendUserMessageCalls[0].message}"`
   );
+});
+
+// Test 5: Streaming detection aborts the current operation immediately
+test("recovery flow: aborts active operation on streaming detection", async () => {
+  const { pi, handlers, sendUserMessageCalls } = createMockPi();
+  const { ctx, abortCalls } = createMockCtx(true);
+
+  extension(pi);
+
+  const messageUpdateHandler = handlers.get("message_update");
+  assert(messageUpdateHandler !== undefined, "Extension should register message_update handler");
+
+  const message: AgentMessage = {
+    role: "assistant",
+    content: [{ type: "text", text: "find safe tool set find safe tool set find safe tool set" }],
+    api: "anthropic-messages",
+    provider: "anthropic",
+    model: "claude-3",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  } as AgentMessage;
+
+  await messageUpdateHandler({ message }, ctx);
+
+  assert(abortCalls.count === 1, `Expected ctx.abort() to be called once, got ${abortCalls.count}`);
+  assert(sendUserMessageCalls.length === 1, `Expected 1 sendUserMessage call, got ${sendUserMessageCalls.length}`);
+  assertEqual(sendUserMessageCalls[0].options.deliverAs, "followUp", "Expected streaming recovery to be queued as followUp");
 });
 
 console.log("\n✅ All recovery flow tests passed!");
